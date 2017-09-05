@@ -1,0 +1,5 @@
+.idea/*
+___pycache___/*
+*.pyc
+results/*
+log/root.log
