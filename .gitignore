@@ -3,3 +3,5 @@ ___pycache___/*
 *.pyc
 results/*
 log/root.log
+dqn_out/*
+examples/dqn_out/*

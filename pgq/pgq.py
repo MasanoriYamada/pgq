@@ -15,15 +15,15 @@ import chainer.links as L
 import chainer.functions as F
 from chainerrl.action_value import DiscreteActionValue
 
-class QFunction(chainer.Chain):
+class PgqDQN(chainer.Chain):
     def __init__(self, obs_size, n_actions):
         self.obs_size = obs_size
         self.n_actions = n_actions
-        super(QFunction, self).__init__()
+        super(PgqDQN, self).__init__()
         with self.init_scope():
-            self.fc1 = L.Linear(obs_size, 20)
-            self.fc2 = L.Linear(20, n_actions)
-            self.fc3 = L.Linear(20, 1)
+            self.fc1 = L.Linear(obs_size, 100)
+            self.fc2 = L.Linear(100, n_actions)
+            self.fc3 = L.Linear(100, 1)
 
     def __call__(self, x):
         h1 = F.relu(self.fc1(x))

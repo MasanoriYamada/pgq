@@ -26,10 +26,12 @@ from chainerrl import misc
 from chainerrl import q_functions
 from chainerrl import replay_buffer
 
+from pgq import pgq
 
 def main():
     import logging
-    logging.basicConfig(level=logging.DEBUG)
+    #logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--outdir', type=str, default='dqn_out')
@@ -105,10 +107,11 @@ def main():
         explorer = explorers.AdditiveOU(sigma=ou_sigma)
     else:
         n_actions = action_space.n
-        q_func = q_functions.FCStateQFunctionWithDiscreteAction(
-            obs_size, n_actions,
-            n_hidden_channels=args.n_hidden_channels,
-            n_hidden_layers=args.n_hidden_layers)
+        q_func = pgq.PgqDQN(obs_size, n_actions)
+        # q_func = q_functions.FCStateQFunctionWithDiscreteAction(
+        #    obs_size, n_actions,
+        #    n_hidden_channels=args.n_hidden_channels,
+        #    n_hidden_layers=args.n_hidden_layers)
         # Use epsilon-greedy for exploration
         explorer = explorers.LinearDecayEpsilonGreedy(
             args.start_epsilon, args.end_epsilon, args.final_exploration_steps,
