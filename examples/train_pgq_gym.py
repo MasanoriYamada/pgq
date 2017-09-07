@@ -35,7 +35,7 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--outdir', type=str, default='dqn_out')
-    parser.add_argument('--env', type=str, default='Pendulum-v0')
+    parser.add_argument('--env', type=str, default='CartPole-v0')
     parser.add_argument('--seed', type=int, default=None)
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--final-exploration-steps',

@@ -14,8 +14,10 @@ import chainer
 import chainer.links as L
 import chainer.functions as F
 from chainerrl.action_value import DiscreteActionValue
+from chainerrl import distribution
+from chainerrl.agents import a3c
 
-class PgqDQN(chainer.Chain):
+class PgqDQN(chainer.Chain, a3c.A3CModel):
     def __init__(self, obs_size, n_actions):
         self.obs_size = obs_size
         self.n_actions = n_actions
@@ -33,10 +35,25 @@ class PgqDQN(chainer.Chain):
 
         # PGQ
         pi = F.softmax(A, axis=-1)
-        pi.unchain_backward()
+        # pi.unchain_backward()
         base = F.sum(A * pi, axis=1, keepdims=True) # (batch, 1)
         A = A -  F.tile(base, (1, self.n_actions)) # (batch, action)
 
         Q = A + F.tile(V, (1, self.n_actions)) # (batch, action)
         return DiscreteActionValue(Q)
+
+    def pi_and_v(self, x):
+        def V(x):
+            h1 = F.relu(self.fc1(x))
+            vout = self.fc3(h1) # (batch, 1)
+            return vout
+        def pi(x):
+            h1 = F.relu(self.fc1(x))
+            A = self.fc2(h1)
+            piout = F.softmax(A, axis=-1)
+
+            return distribution.SoftmaxDistribution(
+            piout, beta=1.0, min_prob=0.0)
+        return pi(x), V(x)
+
 
