@@ -1,167 +1,169 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
+from __future__ import division
 from __future__ import absolute_import
 from builtins import *  # NOQA
 from future import standard_library
 standard_library.install_aliases()
+
 import argparse
+import sys
 
-
-import chainer
-from chainer import functions as F
-from chainer import links as L
+from chainer import optimizers
 import gym
+gym.undo_logger_setup()
+from gym import spaces
 import gym.wrappers
 import numpy as np
 
-from chainerrl.agents import a3c
+from chainerrl.agents.dqn import DQN
 from chainerrl import experiments
-from chainerrl import links
+from chainerrl import explorers
 from chainerrl import misc
-from chainerrl.optimizers.nonbias_weight_decay import NonbiasWeightDecay
-from chainerrl.optimizers import rmsprop_async
-from chainerrl import policies
-from chainerrl.recurrent import RecurrentChainMixin
-from chainerrl import v_function
-
-
-def phi(obs):
-    return obs.astype(np.float32)
-
-
-class A3CFFSoftmax(chainer.ChainList, a3c.A3CModel):
-    """An example of A3C feedforward softmax policy."""
-
-    def __init__(self, ndim_obs, n_actions, hidden_sizes=(200, 200)):
-        self.pi = policies.SoftmaxPolicy(
-            model=links.MLP(ndim_obs, n_actions, hidden_sizes))
-        self.v = links.MLP(ndim_obs, 1, hidden_sizes=hidden_sizes)
-        super().__init__(self.pi, self.v)
-
-    def pi_and_v(self, state):
-        return self.pi(state), self.v(state)
-
-
-class A3CFFMellowmax(chainer.ChainList, a3c.A3CModel):
-    """An example of A3C feedforward mellowmax policy."""
-
-    def __init__(self, ndim_obs, n_actions, hidden_sizes=(200, 200)):
-        self.pi = policies.MellowmaxPolicy(
-            model=links.MLP(ndim_obs, n_actions, hidden_sizes))
-        self.v = links.MLP(ndim_obs, 1, hidden_sizes=hidden_sizes)
-        super().__init__(self.pi, self.v)
-
-    def pi_and_v(self, state):
-        return self.pi(state), self.v(state)
-
-
-class A3CLSTMGaussian(chainer.ChainList, a3c.A3CModel, RecurrentChainMixin):
-    """An example of A3C recurrent Gaussian policy."""
-
-    def __init__(self, obs_size, action_size, hidden_size=200, lstm_size=128):
-        self.pi_head = L.Linear(obs_size, hidden_size)
-        self.v_head = L.Linear(obs_size, hidden_size)
-        self.pi_lstm = L.LSTM(hidden_size, lstm_size)
-        self.v_lstm = L.LSTM(hidden_size, lstm_size)
-        self.pi = policies.LinearGaussianPolicyWithDiagonalCovariance(
-            lstm_size, action_size)
-        self.v = v_function.FCVFunction(lstm_size)
-        super().__init__(self.pi_head, self.v_head,
-                         self.pi_lstm, self.v_lstm, self.pi, self.v)
-
-    def pi_and_v(self, state):
-
-        def forward(head, lstm, tail):
-            h = F.relu(head(state))
-            h = lstm(h)
-            return tail(h)
-
-        pout = forward(self.pi_head, self.pi_lstm, self.pi)
-        vout = forward(self.v_head, self.v_lstm, self.v)
-
-        return pout, vout
+from chainerrl import q_functions
+from chainerrl import replay_buffer
 
 
 def main():
     import logging
+    logging.basicConfig(level=logging.DEBUG)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('processes', type=int)
-    parser.add_argument('--env', type=str, default='CartPole-v0')
-    parser.add_argument('--arch', type=str, default='FFSoftmax',
-                        choices=('FFSoftmax', 'FFMellowmax', 'LSTMGaussian'))
+    parser.add_argument('--outdir', type=str, default='dqn_out')
+    parser.add_argument('--env', type=str, default='Pendulum-v0')
     parser.add_argument('--seed', type=int, default=None)
-    parser.add_argument('--outdir', type=str, default=None)
-    parser.add_argument('--t-max', type=int, default=5)
-    parser.add_argument('--beta', type=float, default=1e-2)
-    parser.add_argument('--profile', action='store_true')
-    parser.add_argument('--steps', type=int, default=8 * 10 ** 7)
-    parser.add_argument('--eval-interval', type=int, default=10 ** 5)
-    parser.add_argument('--eval-n-runs', type=int, default=10)
-    parser.add_argument('--reward-scale-factor', type=float, default=1e-2)
-    parser.add_argument('--rmsprop-epsilon', type=float, default=1e-1)
-    parser.add_argument('--render', action='store_true', default=False)
-    parser.add_argument('--lr', type=float, default=7e-4)
-    parser.add_argument('--weight-decay', type=float, default=0.0)
+    parser.add_argument('--gpu', type=int, default=0)
+    parser.add_argument('--final-exploration-steps',
+                        type=int, default=10 ** 4)
+    parser.add_argument('--start-epsilon', type=float, default=1.0)
+    parser.add_argument('--end-epsilon', type=float, default=0.1)
     parser.add_argument('--demo', action='store_true', default=False)
-    parser.add_argument('--load', type=str, default='')
-    parser.add_argument('--logger-level', type=int, default=logging.DEBUG)
+    parser.add_argument('--load', type=str, default=None)
+    parser.add_argument('--steps', type=int, default=10 ** 5)
+    parser.add_argument('--prioritized-replay', action='store_true')
+    parser.add_argument('--episodic-replay', action='store_true')
+    parser.add_argument('--replay-start-size', type=int, default=None)
+    parser.add_argument('--target-update-interval', type=int, default=10 ** 2)
+    parser.add_argument('--target-update-method', type=str, default='hard')
+    parser.add_argument('--soft-update-tau', type=float, default=1e-2)
+    parser.add_argument('--update-interval', type=int, default=1)
+    parser.add_argument('--eval-n-runs', type=int, default=100)
+    parser.add_argument('--eval-interval', type=int, default=10 ** 4)
+    parser.add_argument('--n-hidden-channels', type=int, default=100)
+    parser.add_argument('--n-hidden-layers', type=int, default=2)
+    parser.add_argument('--gamma', type=float, default=0.99)
+    parser.add_argument('--minibatch-size', type=int, default=None)
+    parser.add_argument('--render-train', action='store_true')
+    parser.add_argument('--render-eval', action='store_true')
     parser.add_argument('--monitor', action='store_true')
+    parser.add_argument('--reward-scale-factor', type=float, default=1e-3)
     args = parser.parse_args()
 
-    logging.getLogger().setLevel(args.logger_level)
+    args.outdir = experiments.prepare_output_dir(
+        args, args.outdir, argv=sys.argv)
+    print('Output files are saved in {}'.format(args.outdir))
 
     if args.seed is not None:
         misc.set_random_seed(args.seed)
 
-    args.outdir = experiments.prepare_output_dir(args, args.outdir)
+    def clip_action_filter(a):
+        return np.clip(a, action_space.low, action_space.high)
 
-    def make_env(process_idx, test):
+    def make_env(for_eval):
         env = gym.make(args.env)
-        if args.monitor and process_idx == 0:
+        if args.monitor:
             env = gym.wrappers.Monitor(env, args.outdir)
-        # Scale rewards observed by agents
-        if not test:
+        if isinstance(env.action_space, spaces.Box):
+            misc.env_modifiers.make_action_filtered(env, clip_action_filter)
+        if not for_eval:
             misc.env_modifiers.make_reward_filtered(
                 env, lambda x: x * args.reward_scale_factor)
-        if args.render and process_idx == 0 and not test:
+        if ((args.render_eval and for_eval) or
+                (args.render_train and not for_eval)):
             misc.env_modifiers.make_rendered(env)
         return env
 
-    sample_env = gym.make(args.env)
-    timestep_limit = sample_env.spec.tags.get(
+    env = make_env(for_eval=False)
+    timestep_limit = env.spec.tags.get(
         'wrapper_config.TimeLimit.max_episode_steps')
-    obs_space = sample_env.observation_space
-    action_space = sample_env.action_space
+    obs_size = env.observation_space.low.size
+    action_space = env.action_space
 
-    # Switch policy types accordingly to action space types
-    if args.arch == 'LSTMGaussian':
-        model = A3CLSTMGaussian(obs_space.low.size, action_space.low.size)
-    elif args.arch == 'FFSoftmax':
-        model = A3CFFSoftmax(obs_space.low.size, action_space.n)
-    elif args.arch == 'FFMellowmax':
-        model = A3CFFMellowmax(obs_space.low.size, action_space.n)
+    if isinstance(action_space, spaces.Box):
+        action_size = action_space.low.size
+        # Use NAF to apply DQN to continuous action spaces
+        q_func = q_functions.FCQuadraticStateQFunction(
+            obs_size, action_size,
+            n_hidden_channels=args.n_hidden_channels,
+            n_hidden_layers=args.n_hidden_layers,
+            action_space=action_space)
+        # Use the Ornstein-Uhlenbeck process for exploration
+        ou_sigma = (action_space.high - action_space.low) * 0.2
+        explorer = explorers.AdditiveOU(sigma=ou_sigma)
+    else:
+        n_actions = action_space.n
+        q_func = q_functions.FCStateQFunctionWithDiscreteAction(
+            obs_size, n_actions,
+            n_hidden_channels=args.n_hidden_channels,
+            n_hidden_layers=args.n_hidden_layers)
+        # Use epsilon-greedy for exploration
+        explorer = explorers.LinearDecayEpsilonGreedy(
+            args.start_epsilon, args.end_epsilon, args.final_exploration_steps,
+            action_space.sample)
 
-    opt = rmsprop_async.RMSpropAsync(
-        lr=args.lr, eps=args.rmsprop_epsilon, alpha=0.99)
-    opt.setup(model)
-    opt.add_hook(chainer.optimizer.GradientClipping(40))
-    if args.weight_decay > 0:
-        opt.add_hook(NonbiasWeightDecay(args.weight_decay))
+    opt = optimizers.Adam()
+    opt.setup(q_func)
 
-    agent = a3c.A3C(model, opt, t_max=args.t_max, gamma=0.99,
-                    beta=args.beta, phi=phi)
+    rbuf_capacity = 5 * 10 ** 5
+    if args.episodic_replay:
+        if args.minibatch_size is None:
+            args.minibatch_size = 4
+        if args.replay_start_size is None:
+            args.replay_start_size = 10
+        if args.prioritized_replay:
+            betasteps = \
+                (args.steps - timestep_limit * args.replay_start_size) \
+                // args.update_interval
+            rbuf = replay_buffer.PrioritizedEpisodicReplayBuffer(
+                rbuf_capacity, betasteps=betasteps)
+        else:
+            rbuf = replay_buffer.EpisodicReplayBuffer(rbuf_capacity)
+    else:
+        if args.minibatch_size is None:
+            args.minibatch_size = 32
+        if args.replay_start_size is None:
+            args.replay_start_size = 1000
+        if args.prioritized_replay:
+            betasteps = (args.steps - args.replay_start_size) \
+                // args.update_interval
+            rbuf = replay_buffer.PrioritizedReplayBuffer(
+                rbuf_capacity, betasteps=betasteps)
+        else:
+            rbuf = replay_buffer.ReplayBuffer(rbuf_capacity)
+
+    def phi(obs):
+        return obs.astype(np.float32)
+
+    agent = DQN(q_func, opt, rbuf, gpu=args.gpu, gamma=args.gamma,
+                explorer=explorer, replay_start_size=args.replay_start_size,
+                target_update_interval=args.target_update_interval,
+                update_interval=args.update_interval,
+                phi=phi, minibatch_size=args.minibatch_size,
+                target_update_method=args.target_update_method,
+                soft_update_tau=args.soft_update_tau,
+                episodic_update=args.episodic_replay, episodic_update_len=16)
+
     if args.load:
         agent.load(args.load)
 
+    eval_env = make_env(for_eval=True)
+
     if args.demo:
-        env = make_env(0, True)
         eval_stats = experiments.eval_performance(
-            env=env,
+            env=eval_env,
             agent=agent,
             n_runs=args.eval_n_runs,
             max_episode_len=timestep_limit)
@@ -169,15 +171,10 @@ def main():
             args.eval_n_runs, eval_stats['mean'], eval_stats['median'],
             eval_stats['stdev']))
     else:
-        experiments.train_agent_async(
-            agent=agent,
-            outdir=args.outdir,
-            processes=args.processes,
-            make_env=make_env,
-            profile=args.profile,
-            steps=args.steps,
-            eval_n_runs=args.eval_n_runs,
-            eval_interval=args.eval_interval,
+        experiments.train_agent_with_evaluation(
+            agent=agent, env=env, steps=args.steps,
+            eval_n_runs=args.eval_n_runs, eval_interval=args.eval_interval,
+            outdir=args.outdir, eval_env=eval_env,
             max_episode_len=timestep_limit)
 
 
